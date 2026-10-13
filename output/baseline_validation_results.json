@@ -1,0 +1,338 @@
+{
+  "task": "FallSave Step 3.1: Classifier Baseline Training",
+  "dataset_counts": {
+    "train": {
+      "total_valid": 1340,
+      "by_class": {
+        "normal": 1134,
+        "falling": 118,
+        "lying": 88
+      }
+    },
+    "validation": {
+      "total_valid": 679,
+      "by_class": {
+        "normal": 617,
+        "falling": 44,
+        "lying": 18
+      }
+    },
+    "test_untouched": {
+      "total_valid": 614,
+      "by_class": {
+        "normal": 564,
+        "falling": 50,
+        "lying": 0
+      },
+      "limitation": "Zero valid Lying windows due to YOLO11 false negatives on ground-level poses."
+    }
+  },
+  "feature_list": [
+    "mean_torso_angle",
+    "max_torso_angle",
+    "min_torso_angle",
+    "delta_torso_angle",
+    "std_torso_angle",
+    "max_downward_velocity",
+    "mean_vertical_velocity",
+    "delta_hip_y",
+    "max_hip_y",
+    "max_angular_velocity",
+    "mean_angular_velocity",
+    "mean_torso_span_y",
+    "delta_torso_span_y",
+    "mean_kp_aspect_ratio",
+    "delta_kp_aspect_ratio",
+    "missing_ratio",
+    "mean_person_confidence"
+  ],
+  "models_evaluated": {
+    "Dummy (Most Frequent)": {
+      "model_name": "Dummy (Most Frequent)",
+      "accuracy": 0.9086892488954345,
+      "macro_f1": 0.31738683127572015,
+      "macro_precision": 0.30289641629847813,
+      "macro_recall": 0.3333333333333333,
+      "weighted_f1": 0.8652180039637085,
+      "weighted_precision": 0.8257161510581488,
+      "weighted_recall": 0.9086892488954345,
+      "per_class": {
+        "normal": {
+          "precision": 0.9086892488954345,
+          "recall": 1.0,
+          "f1": 0.9521604938271605,
+          "support": 617
+        },
+        "falling": {
+          "precision": 0.0,
+          "recall": 0.0,
+          "f1": 0.0,
+          "support": 44
+        },
+        "lying": {
+          "precision": 0.0,
+          "recall": 0.0,
+          "f1": 0.0,
+          "support": 18
+        }
+      },
+      "confusion_matrix": [
+        [
+          617,
+          0,
+          0
+        ],
+        [
+          44,
+          0,
+          0
+        ],
+        [
+          18,
+          0,
+          0
+        ]
+      ]
+    },
+    "Dummy (Stratified)": {
+      "model_name": "Dummy (Stratified)",
+      "accuracy": 0.7746686303387335,
+      "macro_f1": 0.3348538374093471,
+      "macro_precision": 0.3394317639552403,
+      "macro_recall": 0.3373265338419309,
+      "weighted_f1": 0.8002650504501742,
+      "weighted_precision": 0.8284042610726793,
+      "weighted_recall": 0.7746686303387335,
+      "per_class": {
+        "normal": {
+          "precision": 0.9043478260869565,
+          "recall": 0.8427876823338736,
+          "f1": 0.87248322147651,
+          "support": 617
+        },
+        "falling": {
+          "precision": 0.09433962264150944,
+          "recall": 0.11363636363636363,
+          "f1": 0.10309278350515463,
+          "support": 44
+        },
+        "lying": {
+          "precision": 0.0196078431372549,
+          "recall": 0.05555555555555555,
+          "f1": 0.028985507246376812,
+          "support": 18
+        }
+      },
+      "confusion_matrix": [
+        [
+          520,
+          47,
+          50
+        ],
+        [
+          39,
+          5,
+          0
+        ],
+        [
+          16,
+          1,
+          1
+        ]
+      ]
+    },
+    "Logistic Regression (Balanced)": {
+      "model_name": "Logistic Regression (Balanced)",
+      "accuracy": 0.9086892488954345,
+      "macro_f1": 0.7221594265285983,
+      "macro_precision": 0.6449304567725621,
+      "macro_recall": 0.877392236792561,
+      "weighted_f1": 0.9200246278775949,
+      "weighted_precision": 0.9433776695849404,
+      "weighted_recall": 0.9086892488954345,
+      "per_class": {
+        "normal": {
+          "precision": 0.987719298245614,
+          "recall": 0.9124797406807131,
+          "f1": 0.9486099410278012,
+          "support": 617
+        },
+        "falling": {
+          "precision": 0.5416666666666666,
+          "recall": 0.8863636363636364,
+          "f1": 0.6724137931034483,
+          "support": 44
+        },
+        "lying": {
+          "precision": 0.40540540540540543,
+          "recall": 0.8333333333333334,
+          "f1": 0.5454545454545454,
+          "support": 18
+        }
+      },
+      "confusion_matrix": [
+        [
+          563,
+          33,
+          21
+        ],
+        [
+          4,
+          39,
+          1
+        ],
+        [
+          3,
+          0,
+          15
+        ]
+      ]
+    },
+    "Random Forest (Balanced, Default)": {
+      "model_name": "Random Forest (Balanced, Default)",
+      "accuracy": 0.93519882179676,
+      "macro_f1": 0.6101740977096507,
+      "macro_precision": 0.7699414150518251,
+      "macro_recall": 0.5830441093812245,
+      "weighted_f1": 0.9262078885128262,
+      "weighted_precision": 0.9281080541748716,
+      "weighted_recall": 0.93519882179676,
+      "per_class": {
+        "normal": {
+          "precision": 0.9526813880126183,
+          "recall": 0.9789303079416531,
+          "f1": 0.9656274980015987,
+          "support": 617
+        },
+        "falling": {
+          "precision": 0.6904761904761905,
+          "recall": 0.6590909090909091,
+          "f1": 0.6744186046511628,
+          "support": 44
+        },
+        "lying": {
+          "precision": 0.6666666666666666,
+          "recall": 0.1111111111111111,
+          "f1": 0.19047619047619047,
+          "support": 18
+        }
+      },
+      "confusion_matrix": [
+        [
+          604,
+          12,
+          1
+        ],
+        [
+          15,
+          29,
+          0
+        ],
+        [
+          15,
+          1,
+          2
+        ]
+      ]
+    },
+    "Random Forest (Balanced, Regularized)": {
+      "model_name": "Random Forest (Balanced, Regularized)",
+      "accuracy": 0.914580265095729,
+      "macro_f1": 0.6483796766691504,
+      "macro_precision": 0.6215435273917848,
+      "macro_recall": 0.6864785073861249,
+      "weighted_f1": 0.9193593372736464,
+      "weighted_precision": 0.9266608169977195,
+      "weighted_recall": 0.914580265095729,
+      "per_class": {
+        "normal": {
+          "precision": 0.9716193656093489,
+          "recall": 0.9432739059967585,
+          "f1": 0.9572368421052632,
+          "support": 617
+        },
+        "falling": {
+          "precision": 0.5245901639344263,
+          "recall": 0.7272727272727273,
+          "f1": 0.6095238095238096,
+          "support": 44
+        },
+        "lying": {
+          "precision": 0.3684210526315789,
+          "recall": 0.3888888888888889,
+          "f1": 0.3783783783783784,
+          "support": 18
+        }
+      },
+      "confusion_matrix": [
+        [
+          582,
+          23,
+          12
+        ],
+        [
+          12,
+          32,
+          0
+        ],
+        [
+          5,
+          6,
+          7
+        ]
+      ]
+    }
+  },
+  "rf_feature_importances": [
+    {
+      "rank": 1,
+      "feature": "mean_kp_aspect_ratio",
+      "importance": 0.13001062720718548
+    },
+    {
+      "rank": 2,
+      "feature": "max_torso_angle",
+      "importance": 0.11809145938398383
+    },
+    {
+      "rank": 3,
+      "feature": "mean_torso_angle",
+      "importance": 0.10898125782549681
+    },
+    {
+      "rank": 4,
+      "feature": "mean_torso_span_y",
+      "importance": 0.08881297165348016
+    },
+    {
+      "rank": 5,
+      "feature": "delta_torso_angle",
+      "importance": 0.08239354045738892
+    },
+    {
+      "rank": 6,
+      "feature": "delta_kp_aspect_ratio",
+      "importance": 0.06270042975520967
+    },
+    {
+      "rank": 7,
+      "feature": "delta_torso_span_y",
+      "importance": 0.055669213532787774
+    },
+    {
+      "rank": 8,
+      "feature": "max_hip_y",
+      "importance": 0.05419095310930883
+    },
+    {
+      "rank": 9,
+      "feature": "delta_hip_y",
+      "importance": 0.04743487831197053
+    },
+    {
+      "rank": 10,
+      "feature": "mean_angular_velocity",
+      "importance": 0.04631854888057897
+    }
+  ]
+}

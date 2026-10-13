@@ -1,0 +1,68 @@
+{
+  "step": "Step 3.2: Final Baseline Test Evaluation",
+  "model_file": "C:\\Users\\USER\\OneDrive\\\u0e40\u0e2d\u0e01\u0e2a\u0e32\u0e23\\SIT-2569-1\\INT182\\project_saveFall\\models\\logistic_regression_balanced.joblib",
+  "scaler_file": "C:\\Users\\USER\\OneDrive\\\u0e40\u0e2d\u0e01\u0e2a\u0e32\u0e23\\SIT-2569-1\\INT182\\project_saveFall\\output\\feature_scaler.joblib",
+  "test_dataset": {
+    "total_windows": 878,
+    "valid_windows": 614,
+    "excluded_windows": 264,
+    "counts_per_class": {
+      "normal": 564,
+      "falling": 50,
+      "lying": 0
+    },
+    "untestable_classes": [
+      "lying"
+    ],
+    "untestable_class_reason": "Zero valid windows in Test set due to YOLO11 ground-level keypoint detection loss in fall-24, fall-25, fall-29, fall-30, and tracker lock failure in fall-13."
+  },
+  "metrics": {
+    "accuracy": 0.9332247557003257,
+    "macro_f1_present_classes_only": 0.834896239662974,
+    "macro_f1_all_3_classes": 0.5565974931086494,
+    "weighted_f1": 0.9420490728886445,
+    "per_class": {
+      "normal": {
+        "evaluable": true,
+        "support": 564,
+        "precision": 0.9833641404805915,
+        "recall": 0.9432624113475178,
+        "f1": 0.96289592760181,
+        "note": "Evaluated"
+      },
+      "falling": {
+        "evaluable": true,
+        "support": 50,
+        "precision": 0.6212121212121212,
+        "recall": 0.82,
+        "f1": 0.7068965517241379,
+        "note": "Evaluated"
+      },
+      "lying": {
+        "evaluable": false,
+        "support": 0,
+        "precision": 0.0,
+        "recall": null,
+        "f1": null,
+        "note": "Cannot be evaluated (zero valid windows in Test)"
+      }
+    },
+    "confusion_matrix": [
+      [
+        532,
+        25,
+        7
+      ],
+      [
+        9,
+        41,
+        0
+      ],
+      [
+        0,
+        0,
+        0
+      ]
+    ]
+  }
+}

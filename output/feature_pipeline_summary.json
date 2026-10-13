@@ -1,0 +1,61 @@
+{
+  "total_windows": 3210,
+  "by_split": {
+    "train": 1461,
+    "test": 878,
+    "validation": 871
+  },
+  "by_label": {
+    "normal": 2315,
+    "excluded": 577,
+    "falling": 212,
+    "lying": 106
+  },
+  "cross_tab_split_label": {
+    "excluded": {
+      "test": 264,
+      "train": 121,
+      "validation": 192
+    },
+    "falling": {
+      "test": 50,
+      "train": 118,
+      "validation": 44
+    },
+    "lying": {
+      "test": 0,
+      "train": 88,
+      "validation": 18
+    },
+    "normal": {
+      "test": 564,
+      "train": 1134,
+      "validation": 617
+    }
+  },
+  "exclusion_reasons": {
+    "high_missing_ratio": 432,
+    "uninterpolated_gap": 79,
+    "ambiguous_phase_mix": 33,
+    "stress_case_tracking_failure": 33
+  },
+  "feature_columns": [
+    "mean_torso_angle",
+    "max_torso_angle",
+    "min_torso_angle",
+    "delta_torso_angle",
+    "std_torso_angle",
+    "max_downward_velocity",
+    "mean_vertical_velocity",
+    "delta_hip_y",
+    "max_hip_y",
+    "max_angular_velocity",
+    "mean_angular_velocity",
+    "mean_torso_span_y",
+    "delta_torso_span_y",
+    "mean_kp_aspect_ratio",
+    "delta_kp_aspect_ratio",
+    "missing_ratio",
+    "mean_person_confidence"
+  ]
+}
