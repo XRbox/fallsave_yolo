@@ -140,6 +140,9 @@ class FallStateMachine:
         # -------------------------------------------------------------
         # STATE: NORMAL
         # -------------------------------------------------------------
+        transition_reason = None
+        rejection_reason = None
+
         if self.current_state == State.NORMAL:
             self.continuous_recovery_time = 0.0
             self.ground_start_time = None
@@ -149,34 +152,51 @@ class FallStateMachine:
             
             if person_detected:
                 if motion_evidence is not None and self.config.enable_motion_validation:
-                    # 1. Reject if person was already lying down upon arrival (sleeping, floor yoga)
-                    # 2. Reject if movement is slow and intentional (gentle bed transition, exercise)
-                    # 3. Reject if person was never tracked upright prior to suspected event
-                    is_rejected = (
-                        motion_evidence.is_initial_lying
-                        or motion_evidence.is_slow_intentional_movement
-                        or (self.config.require_upright_before_fall and not motion_evidence.was_upright_recently)
-                    )
+                    # Strict Rejection Filters:
+                    # 1. Person was already lying down upon arrival (never stood up)
+                    # 2. Movement was intentional / controlled (reclining on bed/sofa, yoga)
+                    # 3. Person was never tracked upright prior to suspected event
+                    # 4. Movement lacked rapid downward descent (velocity < threshold)
+                    if motion_evidence.is_initial_lying:
+                        is_rejected = True
+                        rejection_reason = "Person was already lying down upon arrival (never stood up)"
+                    elif motion_evidence.is_slow_intentional_movement:
+                        is_rejected = True
+                        rejection_reason = motion_evidence.rejection_reason or "Intentional controlled posture transition"
+                    elif self.config.require_upright_before_fall and not motion_evidence.was_upright_recently:
+                        is_rejected = True
+                        rejection_reason = "No upright standing history prior to horizontal posture"
+                    elif not motion_evidence.has_rapid_descent:
+                        is_rejected = True
+                        rejection_reason = "No rapid downward descent detected (Vy < min threshold)"
+                    else:
+                        is_rejected = False
                     
                     if not is_rejected:
-                        # Fall suspicion triggered by:
-                        # (A) High ML P(falling) corroborated by downward motion or posture transition
-                        # (B) Or clear physical fall event kinematics (rapid descent + transition)
-                        has_ml_suspicion = (p_falling >= self.config.p_fall_threshold) and (
-                            motion_evidence.has_rapid_descent or motion_evidence.has_posture_transition
+                        # An actual fall requires BOTH rapid downward descent AND posture transition
+                        has_valid_kinematics = (
+                            motion_evidence.has_rapid_descent
+                            and motion_evidence.has_posture_transition
                         )
+                        has_ml_suspicion = (p_falling >= self.config.p_fall_threshold) and has_valid_kinematics
                         is_motion_fall = motion_evidence.is_credible_fall_motion
                         
                         allow_suspect = (
                             (has_ml_suspicion or is_motion_fall)
                             and (self.tracked_duration >= self.config.min_tracked_time)
                         )
+                        if allow_suspect:
+                            transition_reason = motion_evidence.trigger_reason or "Rapid downward descent + posture transition"
+                    else:
+                        allow_suspect = False
                 else:
                     # Fallback / legacy path when motion evidence is not provided
                     allow_suspect = (
                         (p_falling >= self.config.p_fall_threshold)
                         and (self.tracked_duration >= self.config.min_tracked_time)
                     )
+                    if allow_suspect:
+                        transition_reason = f"ML P(falling)={p_falling:.2f} >= threshold"
 
             if allow_suspect:
                 self._transition_to(State.FALLING_SUSPECTED, timestamp)
@@ -205,6 +225,10 @@ class FallStateMachine:
                 self.ground_start_time = timestamp
                 self.continuous_recovery_time = 0.0
                 event = "GROUND_CHECK_ENTERED"
+                transition_reason = (
+                    "Ground contact detected (P_lying/horizontal) after suspect fall"
+                    if is_lying else "Person lost from camera after credible fall"
+                )
                 
             # Condition C: Fast recovery (person regained upright posture)
             elif self.continuous_recovery_time >= self.config.quick_recovery_time:
@@ -263,7 +287,9 @@ class FallStateMachine:
             "person_detected": person_detected,
             "time_in_state": timestamp - (self.state_entry_time or timestamp),
             "has_alerted": self.has_alerted,
-            "motion_evidence": motion_evidence
+            "motion_evidence": motion_evidence,
+            "transition_reason": transition_reason,
+            "rejection_reason": rejection_reason
         }
         
         return StateMachineOutput(

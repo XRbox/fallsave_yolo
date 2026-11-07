@@ -1,10 +1,12 @@
 """
-Unit tests for FallSave Step 5.3: Motion-Based Fall Event Detection
+Unit tests for FallSave Step 5.3: Motion-Based Fall Event Detection (with Bug Fix Regressions)
 
-Verifies the 10 focused test scenarios required by Step 5.3:
+Verifies:
 1. Person standing still: no fall.
 2. Person already lying down when first detected: no fall.
+2b. Person enters camera view while already lying down (after empty period): no fall.
 3. Person slowly lying down intentionally: no fall.
+3b. Additional Reproduction Scenario: Intentional Lying Down (Case B) on bed/sofa: no fall.
 4. Person bending down: no fall.
 5. Person doing a yoga-like movement: no alert based only on horizontal posture.
 6. Person rapidly moving downward and transitioning from upright to horizontal: enters fall suspicion.
@@ -12,26 +14,37 @@ Verifies the 10 focused test scenarios required by Step 5.3:
 8. Person rapidly descending but recovering quickly: cancels suspected fall.
 9. Person disappears after a credible suspected fall: confirms fall.
 10. Temporary detection loss without previous fall evidence: no alert.
+11. Single-frame pose extraction helper verification.
 """
 
 import unittest
-from motion_detector import MotionFallDetector, MotionConfig, PostureState, MotionEvidence
+import numpy as np
+from motion_detector import (
+    MotionFallDetector,
+    MotionConfig,
+    PostureState,
+    MotionEvidence,
+    extract_single_frame_pose
+)
 from fall_state_machine import FallStateMachine, StateMachineConfig, State
 
 
 class TestMotionFallDetection(unittest.TestCase):
-    """Test suite covering the 10 required Step 5.3 scenarios."""
+    """Test suite covering the required Step 5.3 scenarios and bug fix regressions."""
 
     def setUp(self):
         self.motion_cfg = MotionConfig(
             upright_angle_max=40.0,
             horizontal_angle_min=60.0,
-            min_downward_velocity=2.0,
-            min_delta_hip_y=0.20,
-            min_delta_torso_angle=18.0,
+            min_downward_velocity=2.8,
+            min_mean_downward_velocity=0.35,
+            min_delta_hip_y=0.25,
+            min_delta_torso_angle=20.0,
+            min_angular_velocity=160.0,
             min_upright_duration=0.3,
             max_time_since_upright=1.8,
-            slow_motion_velocity_limit=1.2
+            max_intentional_downward_v=2.5,
+            max_intentional_angular_v=150.0
         )
         self.fsm_cfg = StateMachineConfig(
             p_fall_threshold=0.45,
@@ -86,7 +99,7 @@ class TestMotionFallDetection(unittest.TestCase):
         self.assertEqual(len(events), 0)
 
     # -------------------------------------------------------------------------
-    # Scenario 2: Person already lying down when first detected -> No fall
+    # Scenario 2: Person already lying down when camera starts -> No fall
     # -------------------------------------------------------------------------
     def test_scenario_02_already_lying_down_when_first_detected(self):
         """Person already lying flat upon arrival is flagged as is_initial_lying and never triggers a fall."""
@@ -94,7 +107,7 @@ class TestMotionFallDetection(unittest.TestCase):
         dt = 0.033
         events = []
 
-        # Person enters camera already lying flat for 4.0 seconds
+        # Person is in camera view already lying flat from frame 1
         for _ in range(120):
             ev = self.detector.update(
                 timestamp=t,
@@ -120,6 +133,53 @@ class TestMotionFallDetection(unittest.TestCase):
         self.assertTrue(ev.is_initial_lying)
         self.assertFalse(ev.was_upright_recently)
         self.assertFalse(ev.is_credible_fall_motion)
+        self.assertEqual(self.fsm.current_state, State.NORMAL)
+        self.assertNotIn("FALL_SUSPECTED", events)
+        self.assertNotIn("ALERT_TRIGGERED", events)
+
+    # -------------------------------------------------------------------------
+    # Scenario 2b: Person enters camera view while already lying down
+    # -------------------------------------------------------------------------
+    def test_scenario_02b_person_enters_camera_while_already_lying_down(self):
+        """Person enters camera view after 3.0s empty period while already lying down -> No fall."""
+        t = 0.0
+        dt = 0.033
+        events = []
+
+        # 1. Empty room for 3.0s
+        for _ in range(90):
+            ev = self.detector.update(
+                timestamp=t, torso_angle=0.0, downward_velocity=0.0,
+                delta_hip_y=0.0, delta_torso_angle=0.0, person_detected=False
+            )
+            self.fsm.update(timestamp=t, p_normal=1.0, p_falling=0.0, p_lying=0.0, person_detected=False, motion_evidence=ev)
+            t += dt
+
+        # 2. Person appears on bed already lying flat (torso_angle=82.0 deg, P(lying)=0.95)
+        for _ in range(90):
+            ev = self.detector.update(
+                timestamp=t,
+                torso_angle=82.0,
+                downward_velocity=0.05,
+                delta_hip_y=0.0,
+                delta_torso_angle=0.0,
+                person_detected=True,
+                p_lying=0.95
+            )
+            out = self.fsm.update(
+                timestamp=t,
+                p_normal=0.05,
+                p_falling=0.10,
+                p_lying=0.90,
+                person_detected=True,
+                motion_evidence=ev
+            )
+            if out.event:
+                events.append(out.event)
+            t += dt
+
+        self.assertTrue(ev.is_initial_lying)
+        self.assertFalse(ev.was_upright_recently)
         self.assertEqual(self.fsm.current_state, State.NORMAL)
         self.assertNotIn("FALL_SUSPECTED", events)
         self.assertNotIn("ALERT_TRIGGERED", events)
@@ -173,6 +233,74 @@ class TestMotionFallDetection(unittest.TestCase):
 
         self.assertEqual(self.fsm.current_state, State.NORMAL)
         self.assertNotIn("FALL_SUSPECTED", events)
+        self.assertNotIn("ALERT_TRIGGERED", events)
+
+    # -------------------------------------------------------------------------
+    # Scenario 3b: Reproduction Scenario: Intentional Lying Down on Bed/Sofa (Case B)
+    # -------------------------------------------------------------------------
+    def test_scenario_03b_intentional_lying_down_bed_sofa_case_b(self):
+        """
+        Case B from prompt:
+        Person starts standing, stays visible, intentionally and gradually lies down on a bed/sofa.
+        Even when AI classifier outputs high P(falling) during recline, system must recognize
+        this as an intentional posture transition and NEVER trigger an alert.
+        """
+        t = 0.0
+        dt = 0.033
+        events = []
+
+        # Step 1: Standing upright in front of webcam for 1.5s
+        for _ in range(45):
+            ev = self.detector.update(
+                t, torso_angle=12.0, downward_velocity=0.15,
+                delta_hip_y=0.0, delta_torso_angle=0.0, person_detected=True,
+                max_angular_velocity=10.0, p_lying=0.02
+            )
+            self.fsm.update(t, p_normal=0.96, p_falling=0.02, p_lying=0.02, person_detected=True, motion_evidence=ev)
+            t += dt
+
+        # Step 2: Sits down on the bed edge (intermediate bent/seated posture for 0.5s)
+        for _ in range(15):
+            ev = self.detector.update(
+                t, torso_angle=42.0, downward_velocity=1.8,
+                delta_hip_y=0.22, delta_torso_angle=30.0, person_detected=True,
+                max_angular_velocity=80.0, p_lying=0.15
+            )
+            out = self.fsm.update(t, p_normal=0.75, p_falling=0.20, p_lying=0.05, person_detected=True, motion_evidence=ev)
+            if out.event:
+                events.append(out.event)
+            t += dt
+
+        # Step 3: Reclines back onto the bed mattress over 1.0s
+        # Notice: hips remain on the bed (delta_hip_y is low, 0.12), angular velocity is smooth (95 deg/s),
+        # but AI classifier outputs P(falling) = 0.95 due to tilting towards horizontal
+        for _ in range(30):
+            ev = self.detector.update(
+                t, torso_angle=76.0, downward_velocity=1.4,
+                delta_hip_y=0.12, delta_torso_angle=34.0, person_detected=True,
+                max_angular_velocity=95.0, p_lying=0.55
+            )
+            out = self.fsm.update(t, p_normal=0.02, p_falling=0.95, p_lying=0.45, person_detected=True, motion_evidence=ev)
+            if out.event:
+                events.append(out.event)
+            t += dt
+
+        # Step 4: Lying comfortably on bed for 3.5s (> 2.5s ground confirm time)
+        for _ in range(105):
+            ev = self.detector.update(
+                t, torso_angle=82.0, downward_velocity=0.02,
+                delta_hip_y=0.0, delta_torso_angle=0.0, person_detected=True,
+                max_angular_velocity=5.0, p_lying=0.92
+            )
+            out = self.fsm.update(t, p_normal=0.05, p_falling=0.05, p_lying=0.90, person_detected=True, motion_evidence=ev)
+            if out.event:
+                events.append(out.event)
+            t += dt
+
+        # Must remain in NORMAL throughout; MUST NOT trigger FALL_SUSPECTED or ALERT_TRIGGERED!
+        self.assertEqual(self.fsm.current_state, State.NORMAL)
+        self.assertNotIn("FALL_SUSPECTED", events)
+        self.assertNotIn("GROUND_CHECK_ENTERED", events)
         self.assertNotIn("ALERT_TRIGGERED", events)
 
     # -------------------------------------------------------------------------
@@ -254,11 +382,11 @@ class TestMotionFallDetection(unittest.TestCase):
             self.fsm.update(t, p_normal=0.92, p_falling=0.05, p_lying=0.03, person_detected=True, motion_evidence=ev)
             t += dt
 
-        # 2. Sudden fall drop
+        # 2. Sudden uncontrolled fall drop (high Vy=6.2, large dHipY=0.75, angular velocity=380 deg/s)
         ev = self.detector.update(
             t, torso_angle=75.0, downward_velocity=6.2,
             delta_hip_y=0.75, delta_torso_angle=58.0, person_detected=True,
-            mean_downward_velocity=1.5, max_torso_angle=80.0
+            mean_downward_velocity=1.5, max_torso_angle=80.0, max_angular_velocity=380.0
         )
         out = self.fsm.update(
             t, p_normal=0.10, p_falling=0.85, p_lying=0.05,
@@ -290,7 +418,7 @@ class TestMotionFallDetection(unittest.TestCase):
         ev = self.detector.update(
             t, torso_angle=75.0, downward_velocity=6.5,
             delta_hip_y=0.85, delta_torso_angle=60.0, person_detected=True,
-            mean_downward_velocity=1.6, max_torso_angle=82.0
+            mean_downward_velocity=1.6, max_torso_angle=82.0, max_angular_velocity=410.0
         )
         self.fsm.update(t, p_normal=0.10, p_falling=0.88, p_lying=0.02, person_detected=True, motion_evidence=ev)
         t += dt
@@ -331,7 +459,7 @@ class TestMotionFallDetection(unittest.TestCase):
         ev = self.detector.update(
             t, torso_angle=65.0, downward_velocity=4.5,
             delta_hip_y=0.60, delta_torso_angle=45.0, person_detected=True,
-            mean_downward_velocity=1.2, max_torso_angle=70.0
+            mean_downward_velocity=1.2, max_torso_angle=70.0, max_angular_velocity=320.0
         )
         out = self.fsm.update(t, p_normal=0.15, p_falling=0.75, p_lying=0.10, person_detected=True, motion_evidence=ev)
         self.assertEqual(out.state, State.FALLING_SUSPECTED)
@@ -368,7 +496,7 @@ class TestMotionFallDetection(unittest.TestCase):
         ev = self.detector.update(
             t, torso_angle=75.0, downward_velocity=5.8,
             delta_hip_y=0.80, delta_torso_angle=55.0, person_detected=True,
-            mean_downward_velocity=1.4, max_torso_angle=80.0
+            mean_downward_velocity=1.4, max_torso_angle=80.0, max_angular_velocity=390.0
         )
         self.fsm.update(t, p_normal=0.10, p_falling=0.85, p_lying=0.05, person_detected=True, motion_evidence=ev)
         t += dt
@@ -419,6 +547,41 @@ class TestMotionFallDetection(unittest.TestCase):
         self.assertNotIn("FALL_SUSPECTED", events)
         self.assertNotIn("GROUND_CHECK_ENTERED", events)
         self.assertNotIn("ALERT_TRIGGERED", events)
+
+    # -------------------------------------------------------------------------
+    # Scenario 11: Single-frame pose extraction helper
+    # -------------------------------------------------------------------------
+    def test_scenario_11_single_frame_pose_extraction(self):
+        """Single-frame pose extraction accurately extracts horizontal and upright posture from raw keypoints."""
+        # 1. Synthesize standing keypoints (shoulders above hips)
+        kps_standing = np.zeros((17, 3), dtype=float)
+        kps_standing[:, 2] = 0.90  # high confidence
+        # Shoulders (5, 6) at y=100
+        kps_standing[5, :2] = [200, 100]
+        kps_standing[6, :2] = [240, 100]
+        # Hips (11, 12) at y=250
+        kps_standing[11, :2] = [210, 250]
+        kps_standing[12, :2] = [230, 250]
+
+        res_standing = extract_single_frame_pose(kps_standing)
+        self.assertTrue(res_standing["valid"])
+        self.assertEqual(res_standing["posture"], PostureState.UPRIGHT)
+        self.assertLess(res_standing["torso_angle"], 15.0)
+
+        # 2. Synthesize lying flat keypoints (shoulders and hips on same horizontal plane)
+        kps_lying = np.zeros((17, 3), dtype=float)
+        kps_lying[:, 2] = 0.90
+        # Shoulders (5, 6) at x=100, y=300
+        kps_lying[5, :2] = [100, 290]
+        kps_lying[6, :2] = [100, 310]
+        # Hips (11, 12) at x=250, y=300
+        kps_lying[11, :2] = [250, 295]
+        kps_lying[12, :2] = [250, 305]
+
+        res_lying = extract_single_frame_pose(kps_lying)
+        self.assertTrue(res_lying["valid"])
+        self.assertEqual(res_lying["posture"], PostureState.HORIZONTAL)
+        self.assertGreater(res_lying["torso_angle"], 75.0)
 
 
 if __name__ == "__main__":

@@ -28,7 +28,7 @@ from ultralytics import YOLO
 
 from fall_state_machine import FallStateMachine, StateMachineConfig, State, StateMachineOutput
 from alert_handler import AlertHandler
-from motion_detector import MotionFallDetector, MotionConfig, PostureState, MotionEvidence
+from motion_detector import MotionFallDetector, MotionConfig, PostureState, MotionEvidence, extract_single_frame_pose
 
 # -------------------------------------------------------------
 # Paths & Schema Constants (Matching Steps 2.3 - 3.2 exactly)
@@ -499,11 +499,26 @@ def run_pipeline(
                 p_fall = float(probs[1])
                 p_lie = float(probs[2])
             else:
-                # When no person is detected or buffer has > 20% missing frames:
-                # Do NOT pass out-of-distribution empty keypoints to the classifier.
-                p_norm = 1.0 if not person_detected else 0.8
-                p_fall = 0.0
-                p_lie = 0.0
+                # When buffer is warming up (< 20 frames):
+                # Extract instantaneous single-frame pose to detect starting posture from Frame 1
+                frame_pose = extract_single_frame_pose(primary_kps)
+                if person_detected and frame_pose["valid"]:
+                    if frame_pose["posture"] == PostureState.HORIZONTAL:
+                        p_norm = 0.10
+                        p_fall = 0.05
+                        p_lie = 0.85
+                    elif frame_pose["posture"] == PostureState.BENT:
+                        p_norm = 0.60
+                        p_fall = 0.15
+                        p_lie = 0.25
+                    else:
+                        p_norm = 0.90
+                        p_fall = 0.05
+                        p_lie = 0.05
+                else:
+                    p_norm = 1.0 if not person_detected else 0.8
+                    p_fall = 0.0
+                    p_lie = 0.0
 
             # 6. Step 5.3: Motion-Based Fall Event Analysis
             if raw_feat is not None:
@@ -514,14 +529,18 @@ def run_pipeline(
                     p_lying=p_lie
                 )
             else:
+                # Use instantaneous single-frame pose during buffer warmup
+                frame_pose = extract_single_frame_pose(primary_kps)
+                inst_angle = frame_pose["torso_angle"] if (person_detected and frame_pose["valid"]) else 0.0
                 motion_evidence = motion_detector.update(
                     timestamp=active_timestamp,
-                    torso_angle=0.0,
+                    torso_angle=inst_angle,
                     downward_velocity=0.0,
                     delta_hip_y=0.0,
                     delta_torso_angle=0.0,
                     person_detected=person_detected,
-                    p_lying=p_lie
+                    p_lying=p_lie,
+                    person_confidence=person_confidence
                 )
 
             # 7. Update FallStateMachine with ML probabilities and motion evidence
@@ -533,6 +552,29 @@ def run_pipeline(
                 person_detected=person_detected,
                 motion_evidence=motion_evidence
             )
+
+            # Diagnostic Logging during relevant motion or state change
+            is_relevant_motion = (
+                person_detected and (
+                    p_fall >= 0.25
+                    or p_lie >= 0.25
+                    or motion_evidence.current_posture != PostureState.UPRIGHT
+                    or fsm_out.state != State.NORMAL
+                    or fsm_out.event is not None
+                )
+            )
+
+            if is_relevant_motion:
+                posture_desc = f"{motion_evidence.current_posture.value} (angle={motion_evidence.torso_angle:.1f}°, dAngle={motion_evidence.delta_angle:.1f}°)"
+                kinematics_desc = f"Vy={motion_evidence.downward_velocity:.2f}, dHipY={motion_evidence.vertical_displacement:.2f}, AngV={motion_evidence.angular_velocity:.0f}°/s"
+                history_desc = f"InitLying={motion_evidence.is_initial_lying}, UprightRecent={motion_evidence.was_upright_recently}"
+                probs_desc = f"P(N)={p_norm:.2f}, P(F)={p_fall:.2f}, P(L)={p_lie:.2f}"
+                res_desc = "MOTION_FALL" if motion_evidence.is_credible_fall_motion else "SAFE"
+                
+                log_msg = f"[DIAG] t={active_timestamp:5.2f}s (F#{frame_idx:4d}) | State={fsm_out.state.value:17s} | Posture={posture_desc} | {kinematics_desc} | {history_desc} | {probs_desc} | Result={res_desc}"
+                if fsm_out.metadata.get("rejection_reason"):
+                    log_msg += f" | Rejection: {fsm_out.metadata['rejection_reason']}"
+                print(log_msg)
 
             # 8. Render Preview Base Frame
             display_frame = yolo_results.plot() if person_detected else frame.copy()
@@ -552,6 +594,14 @@ def run_pipeline(
                 if alert_res.get("sound_played"):
                     print(f"    [AUDIO] Fall alert sound dispatched.")
                 print()
+            elif fsm_out.event == "FALL_SUSPECTED":
+                reason = fsm_out.metadata.get("transition_reason", "Kinematics & AI prediction met criteria")
+                print(f"\n>>> [TRANSITION -> FALLING_SUSPECTED] at t={active_timestamp:.2f}s (Frame #{frame_idx})!")
+                print(f"    Exact Reason: {reason}\n")
+            elif fsm_out.event == "GROUND_CHECK_ENTERED":
+                reason = fsm_out.metadata.get("transition_reason", "Ground contact detected after suspect fall")
+                print(f"\n>>> [TRANSITION -> GROUND_CHECK] at t={active_timestamp:.2f}s (Frame #{frame_idx})!")
+                print(f"    Exact Reason: {reason}\n")
             elif fsm_out.event in ("RECOVERED", "POST_FALL_RESET", "SUSPECT_CLEARED", "SUSPECT_TIMEOUT"):
                 print(f"[EVENT] {fsm_out.event} at t={active_timestamp:.2f}s (State: {fsm_out.state.value})")
                 alert_handler.reset()
