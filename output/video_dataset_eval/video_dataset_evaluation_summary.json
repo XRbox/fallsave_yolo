@@ -1,0 +1,33 @@
+{
+    "dataset_root": "C:\\Users\\USER\\OneDrive\\\u0e40\u0e2d\u0e01\u0e2a\u0e32\u0e23\\SIT-2569-1\\INT182\\project_saveFall\\VideoDataset\\VideoDataset",
+    "total_evaluated": 2014,
+    "parameters": {
+        "ground_confirm_time": 2.0,
+        "hold_time": 2.0,
+        "seed": 42
+    },
+    "metrics_strict": {
+        "total": 2014,
+        "tp": 631,
+        "fp": 8,
+        "tn": 1009,
+        "fn": 366,
+        "accuracy": 81.43,
+        "sensitivity_recall": 63.29,
+        "specificity": 99.21,
+        "precision": 98.75,
+        "f1_score": 77.14
+    },
+    "metrics_suspected": {
+        "total": 2014,
+        "tp": 967,
+        "fp": 206,
+        "tn": 811,
+        "fn": 30,
+        "accuracy": 88.28,
+        "sensitivity_recall": 96.99,
+        "specificity": 79.74,
+        "precision": 82.44,
+        "f1_score": 89.12
+    }
+}

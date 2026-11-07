@@ -211,5 +211,3 @@ python -m unittest test_state_machine.py -v
 ## 👥 ผู้พัฒนาและการติดต่อ (Credits)
 - **รายวิชา:** INT182 Data Structures & Algorithms / Project Work
 - **สถาบัน:** คณะเทคโนโลยีสารสนเทศ (SIT), มหาวิทยาลัยเทคโนโลยีพระจอมเกล้าธนบุรี (KMUTT)
-=======
-

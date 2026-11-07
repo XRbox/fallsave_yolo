@@ -13,10 +13,17 @@ ENV/
 dataset/
 zips/
 archive/
+VideoDataset/
 *.zip
+*.rar
+*.tar.gz
+*.7z
 
-# Output previews & Large extracted raw files
+# Output previews & Large extracted raw files / local artifacts
 output/previews/
+output/alerts/
+output/atom_*.jpg
+output/sample_*.jpg
 output/keypoints.csv
 
 # IDE & Editor settings

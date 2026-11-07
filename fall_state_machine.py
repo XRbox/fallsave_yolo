@@ -1,5 +1,5 @@
 """
-FallSave Step 4.2: Standalone Fall Detection State Machine
+FallSave Step 5.3: Standalone Fall Detection State Machine with Motion Validation
 
 Implements the four-state rule-based decision logic:
 - NORMAL
@@ -7,13 +7,23 @@ Implements the four-state rule-based decision logic:
 - GROUND_CHECK
 - FALL_CONFIRMED
 
-Completely decoupled from OpenCV, webcam, audio, and UI.
-Driven by classifier probabilities, detection status, and timestamps.
+Integrates:
+- ML Classifier probabilities (p_normal, p_falling, p_lying)
+- Motion-based fall event evidence (MotionEvidence from motion_detector.py)
+- Temporal confirmation and recovery timers
+
+Decoupled from OpenCV, webcam, audio, and UI.
 """
 
 from enum import Enum
 from dataclasses import dataclass, field
 from typing import Optional, Dict, Any, Tuple
+
+try:
+    from motion_detector import MotionEvidence, PostureState
+except ImportError:
+    MotionEvidence = Any
+    PostureState = None
 
 
 class State(Enum):
@@ -34,6 +44,11 @@ class StateMachineConfig:
     ground_confirm_time: float = 2.5        # Seconds grounded or undetected to confirm fall
     standup_recovery_time: float = 1.0      # Seconds of sustained normal posture to recover from GROUND_CHECK
     post_confirm_reset_time: float = 5.0    # Seconds of upright posture to reset from FALL_CONFIRMED
+    min_tracked_time: float = 0.1           # Min seconds person was actively tracked before allowing suspect fall
+    
+    # Motion-based event detection configuration (Step 5.3)
+    enable_motion_validation: bool = True   # When True and motion_evidence provided, validates motion
+    require_upright_before_fall: bool = True # Reject fall if person was not upright prior to event
 
 
 @dataclass
@@ -50,7 +65,9 @@ class FallStateMachine:
     """
     Robust 4-state fall detection state machine for FallSave.
     
-    Operates on streaming predictions: (timestamp, p_normal, p_falling, p_lying, person_detected).
+    Operates on streaming predictions: (timestamp, p_normal, p_falling, p_lying, person_detected)
+    and optional MotionEvidence from motion_detector.py.
+    
     Uses timestamps for true elapsed time, accommodating variable frame rates and dropped frames.
     """
     
@@ -66,6 +83,8 @@ class FallStateMachine:
         self.suspect_start_time: Optional[float] = None
         self.ground_start_time: Optional[float] = None
         self.continuous_recovery_time: float = 0.0
+        self.tracked_duration: float = 0.0
+        self.had_credible_fall: bool = False
         self.has_alerted: bool = False
 
     def update(
@@ -74,7 +93,8 @@ class FallStateMachine:
         p_normal: float,
         p_falling: float,
         p_lying: float,
-        person_detected: bool = True
+        person_detected: bool = True,
+        motion_evidence: Optional[Any] = None
     ) -> StateMachineOutput:
         """
         Updates the state machine with a new frame/window observation.
@@ -85,6 +105,7 @@ class FallStateMachine:
             p_falling: Classifier probability for Falling (0.0 to 1.0).
             p_lying: Classifier probability for Lying (0.0 to 1.0).
             person_detected: True if pose was detected, False if person missing/occluded.
+            motion_evidence: Optional MotionEvidence instance from MotionFallDetector.
             
         Returns:
             StateMachineOutput containing current state, triggered event (if any), and timers.
@@ -98,8 +119,20 @@ class FallStateMachine:
         
         event: Optional[str] = None
         
+        # Track person presence in NORMAL state
+        if person_detected:
+            self.tracked_duration += dt
+        else:
+            self.tracked_duration = 0.0
+
         # Track continuous normal recovery
-        if person_detected and (p_normal >= self.config.p_normal_recovery):
+        # Recovery requires either high P(normal) or confirmed upright posture
+        is_recovering = person_detected and (
+            p_normal >= self.config.p_normal_recovery
+            or (motion_evidence is not None and getattr(motion_evidence, 'current_posture', None) == getattr(PostureState, 'UPRIGHT', None))
+        )
+        
+        if is_recovering:
             self.continuous_recovery_time += dt
         else:
             self.continuous_recovery_time = 0.0
@@ -110,10 +143,45 @@ class FallStateMachine:
         if self.current_state == State.NORMAL:
             self.continuous_recovery_time = 0.0
             self.ground_start_time = None
+            self.had_credible_fall = False
             
-            if person_detected and (p_falling >= self.config.p_fall_threshold):
+            allow_suspect = False
+            
+            if person_detected:
+                if motion_evidence is not None and self.config.enable_motion_validation:
+                    # 1. Reject if person was already lying down upon arrival (sleeping, floor yoga)
+                    # 2. Reject if movement is slow and intentional (gentle bed transition, exercise)
+                    # 3. Reject if person was never tracked upright prior to suspected event
+                    is_rejected = (
+                        motion_evidence.is_initial_lying
+                        or motion_evidence.is_slow_intentional_movement
+                        or (self.config.require_upright_before_fall and not motion_evidence.was_upright_recently)
+                    )
+                    
+                    if not is_rejected:
+                        # Fall suspicion triggered by:
+                        # (A) High ML P(falling) corroborated by downward motion or posture transition
+                        # (B) Or clear physical fall event kinematics (rapid descent + transition)
+                        has_ml_suspicion = (p_falling >= self.config.p_fall_threshold) and (
+                            motion_evidence.has_rapid_descent or motion_evidence.has_posture_transition
+                        )
+                        is_motion_fall = motion_evidence.is_credible_fall_motion
+                        
+                        allow_suspect = (
+                            (has_ml_suspicion or is_motion_fall)
+                            and (self.tracked_duration >= self.config.min_tracked_time)
+                        )
+                else:
+                    # Fallback / legacy path when motion evidence is not provided
+                    allow_suspect = (
+                        (p_falling >= self.config.p_fall_threshold)
+                        and (self.tracked_duration >= self.config.min_tracked_time)
+                    )
+
+            if allow_suspect:
                 self._transition_to(State.FALLING_SUSPECTED, timestamp)
                 self.suspect_start_time = timestamp
+                self.had_credible_fall = True
                 event = "FALL_SUSPECTED"
                 
         # -------------------------------------------------------------
@@ -122,10 +190,15 @@ class FallStateMachine:
         elif self.current_state == State.FALLING_SUSPECTED:
             time_in_suspect = timestamp - (self.suspect_start_time or timestamp)
             
-            # Condition A: Ground contact detected OR person disappeared right after suspect fall
+            # Condition A: Ground contact detected (via ML lying probability or horizontal posture)
+            is_lying = person_detected and (
+                (p_lying >= self.config.p_lying_threshold)
+                or (motion_evidence is not None and getattr(motion_evidence, 'current_posture', None) == getattr(PostureState, 'HORIZONTAL', None))
+            )
+
+            # Condition B: Person disappeared AFTER a credible tracked fall
             # (Matches empirical finding where YOLO loses pose upon floor impact)
-            is_lying = person_detected and (p_lying >= self.config.p_lying_threshold)
-            is_lost_after_fall = not person_detected
+            is_lost_after_fall = (not person_detected) and self.had_credible_fall
             
             if is_lying or is_lost_after_fall:
                 self._transition_to(State.GROUND_CHECK, timestamp)
@@ -133,14 +206,16 @@ class FallStateMachine:
                 self.continuous_recovery_time = 0.0
                 event = "GROUND_CHECK_ENTERED"
                 
-            # Condition B: Fast recovery (person regained upright posture)
+            # Condition C: Fast recovery (person regained upright posture)
             elif self.continuous_recovery_time >= self.config.quick_recovery_time:
                 self._transition_to(State.NORMAL, timestamp)
+                self.had_credible_fall = False
                 event = "SUSPECT_CLEARED"
                 
-            # Condition C: Suspect timeout (no ground evidence, no further fall motion)
+            # Condition D: Suspect timeout (no ground evidence, no further fall motion)
             elif time_in_suspect >= self.config.suspect_timeout:
                 self._transition_to(State.NORMAL, timestamp)
+                self.had_credible_fall = False
                 event = "SUSPECT_TIMEOUT"
                 
         # -------------------------------------------------------------
@@ -153,6 +228,7 @@ class FallStateMachine:
             if self.continuous_recovery_time >= self.config.standup_recovery_time:
                 self._transition_to(State.NORMAL, timestamp)
                 self.ground_start_time = None
+                self.had_credible_fall = False
                 event = "RECOVERED"
                 
             # Condition B: Sustained ground presence / undetected on floor beyond confirm limit
@@ -171,6 +247,7 @@ class FallStateMachine:
                 self._transition_to(State.NORMAL, timestamp)
                 self.has_alerted = False
                 self.ground_start_time = None
+                self.had_credible_fall = False
                 event = "POST_FALL_RESET"
                 
         elapsed_ground = (
@@ -185,7 +262,8 @@ class FallStateMachine:
             "p_lying": p_lying,
             "person_detected": person_detected,
             "time_in_state": timestamp - (self.state_entry_time or timestamp),
-            "has_alerted": self.has_alerted
+            "has_alerted": self.has_alerted,
+            "motion_evidence": motion_evidence
         }
         
         return StateMachineOutput(

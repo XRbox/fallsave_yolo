@@ -1,5 +1,5 @@
 """
-FallSave Step 5.1: Live Webcam AI Fall Detection Pipeline
+FallSave Step 5.3: Live AI Fall Detection Pipeline with Motion Validation
 
 Integrates:
 1. Video/Webcam capture
@@ -7,10 +7,10 @@ Integrates:
 3. LiveFeatureBuffer matching exact training feature schema & order
 4. StandardScaler (loaded from output/feature_scaler.joblib)
 5. Logistic Regression baseline (loaded from models/logistic_regression_balanced.joblib)
-6. FallStateMachine (4-state temporal decision logic)
-7. On-screen real-time HUD and debug overlay
-
-Audio alerts and snapshots are deferred to Step 5.2.
+6. MotionFallDetector (Step 5.3: Motion-based downward velocity, posture transition, & history)
+7. FallStateMachine (4-state temporal decision logic with motion validation)
+8. AlertHandler (Audio beep alert & timestamped snapshot saving)
+9. On-screen real-time HUD and debug overlay
 """
 
 import os
@@ -27,6 +27,8 @@ import pandas as pd
 from ultralytics import YOLO
 
 from fall_state_machine import FallStateMachine, StateMachineConfig, State, StateMachineOutput
+from alert_handler import AlertHandler
+from motion_detector import MotionFallDetector, MotionConfig, PostureState, MotionEvidence
 
 # -------------------------------------------------------------
 # Paths & Schema Constants (Matching Steps 2.3 - 3.2 exactly)
@@ -97,6 +99,16 @@ class LiveFeatureBuffer:
     def is_ready(self) -> bool:
         """Returns True once the buffer is full (20 frames)."""
         return len(self.buffer) == self.window_length
+
+    def get_detected_count(self) -> int:
+        """Returns the number of frames in the buffer with valid person detection."""
+        return sum(1 for item in self.buffer if item["detected"] == 1)
+
+    def get_missing_ratio(self) -> float:
+        """Returns the ratio of missing person frames in the current buffer."""
+        if not self.buffer:
+            return 1.0
+        return 1.0 - (self.get_detected_count() / len(self.buffer))
 
     def extract_features(self) -> np.ndarray:
         """
@@ -231,7 +243,9 @@ def draw_hud(
     person_detected: bool,
     elapsed_ground: float,
     confirm_limit: float,
-    fps: float
+    fps: float,
+    alert_active: bool = False,
+    motion_evidence: Optional[MotionEvidence] = None
 ):
     """Renders debug HUD overlay on the display frame."""
     h, w = frame.shape[:2]
@@ -248,6 +262,8 @@ def draw_hud(
     # Top Status Banner
     cv2.rectangle(frame, (0, 0), (w, 50), state_color, -1)
     banner_text = f"STATE: {state.value}"
+    if alert_active:
+        banner_text += " [ALERT ACTIVE!]"
     cv2.putText(frame, banner_text, (15, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 255, 255), 2)
 
     # Detection status & FPS
@@ -256,8 +272,9 @@ def draw_hud(
     cv2.putText(frame, det_str, (w - 280, 32), cv2.FONT_HERSHEY_SIMPLEX, 0.55, det_color, 2)
     cv2.putText(frame, f"FPS: {fps:.1f}", (w - 100, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (220, 220, 220), 1)
 
-    # Semi-transparent overlay box for probabilities
-    box_w, box_h = 320, 110
+    # Semi-transparent overlay box for probabilities and motion
+    box_w = 340
+    box_h = 165 if (alert_active or motion_evidence is not None) else 110
     overlay = frame.copy()
     cv2.rectangle(overlay, (10, 60), (10 + box_w, 60 + box_h), (20, 20, 20), -1)
     cv2.addWeighted(overlay, 0.65, frame, 0.35, 0, frame)
@@ -267,10 +284,23 @@ def draw_hud(
     cv2.putText(frame, f"P(Falling) : {p_falling:.2f}", (20, 110), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (100, 220, 255), 1)
     cv2.putText(frame, f"P(Lying)   : {p_lying:.2f}", (20, 135), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 180, 255), 1)
 
-    # Ground Check countdown/timer
+    # Step 5.3 Motion Evidence Overlay
+    if motion_evidence is not None and motion_evidence.current_posture != PostureState.UNKNOWN:
+        motion_tag = "FALL-MOTION" if motion_evidence.is_credible_fall_motion else "STABLE"
+        if motion_evidence.is_initial_lying:
+            motion_tag = "ALREADY-LYING"
+        elif motion_evidence.is_slow_intentional_movement:
+            motion_tag = "SLOW-INTENTIONAL"
+        posture_str = f"Posture: {motion_evidence.current_posture.value} ({motion_evidence.torso_angle:.0f}deg) | [{motion_tag}]"
+        cv2.putText(frame, posture_str, (20, 160), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 220, 150), 1)
+
+    # Ground Check countdown/timer or Alert notification
     if state in (State.GROUND_CHECK, State.FALL_CONFIRMED):
         timer_text = f"Ground Timer: {elapsed_ground:.1f}s / {confirm_limit:.1f}s"
-        cv2.putText(frame, timer_text, (20, 160), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 255), 2)
+        cv2.putText(frame, timer_text, (20, 185 if motion_evidence else 160), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 255), 2)
+
+    if alert_active:
+        cv2.putText(frame, "SNAPSHOT SAVED & ALARM ON", (20, 210 if motion_evidence else 185), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 140, 255), 2)
 
     # Controls instruction
     cv2.putText(frame, "Press 'q' to quit | 'r' to reset", (15, h - 15), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (180, 180, 180), 1)
@@ -283,41 +313,59 @@ def run_pipeline(
     headless: bool = False,
     max_frames: Optional[int] = None,
     yolo_conf: float = 0.25,
-    hold_last_seconds: float = 0.0
+    hold_last_seconds: float = 0.0,
+    enable_sound: bool = True,
+    alert_dir: str = "output/alerts",
+    enable_motion_validation: bool = True,
+    min_downward_velocity: float = 2.0,
+    ground_confirm_time: float = 2.5
 ):
     print("=" * 65)
-    print("   FALLSAVE STEP 5.1: LIVE AI FALL DETECTION PIPELINE   ")
+    print("   FALLSAVE STEP 5.3: LIVE AI FALL DETECTION PIPELINE   ")
     print("=" * 65)
 
     # 1. Load Pretrained Models & Artifacts
-    print(f"[1/4] Loading YOLO11n-Pose from: {YOLO_MODEL_PATH}")
+    print(f"[1/5] Loading YOLO11n-Pose from: {YOLO_MODEL_PATH}")
     if not os.path.exists(YOLO_MODEL_PATH):
         raise FileNotFoundError(f"Missing YOLO model checkpoint at: {YOLO_MODEL_PATH}")
     yolo_model = YOLO(YOLO_MODEL_PATH)
 
-    print(f"[2/4] Loading StandardScaler from: {SCALER_PATH}")
+    print(f"[2/5] Loading StandardScaler from: {SCALER_PATH}")
     if not os.path.exists(SCALER_PATH):
         raise FileNotFoundError(f"Missing feature scaler at: {SCALER_PATH}")
     scaler = joblib.load(SCALER_PATH)
 
-    print(f"[3/4] Loading Classifier from: {CLASSIFIER_PATH}")
+    print(f"[3/5] Loading Classifier from: {CLASSIFIER_PATH}")
     if not os.path.exists(CLASSIFIER_PATH):
         raise FileNotFoundError(f"Missing classifier baseline at: {CLASSIFIER_PATH}")
     classifier = joblib.load(CLASSIFIER_PATH)
 
-    print(f"[4/4] Initializing FallStateMachine & LiveFeatureBuffer")
+    print(f"[4/5] Initializing MotionFallDetector, FallStateMachine & LiveFeatureBuffer")
+    motion_config = MotionConfig(
+        min_downward_velocity=min_downward_velocity
+    )
+    motion_detector = MotionFallDetector(motion_config)
+
     fsm_config = StateMachineConfig(
         p_fall_threshold=0.45,
         p_lying_threshold=0.35,
         p_normal_recovery=0.65,
         suspect_timeout=1.5,
         quick_recovery_time=0.4,
-        ground_confirm_time=2.5,
+        ground_confirm_time=ground_confirm_time,
         standup_recovery_time=1.0,
-        post_confirm_reset_time=5.0
+        post_confirm_reset_time=5.0,
+        enable_motion_validation=enable_motion_validation
     )
     fsm = FallStateMachine(fsm_config)
     feature_buffer = LiveFeatureBuffer(window_length=WINDOW_LENGTH, fps=ASSUMED_FPS)
+
+    print(f"[5/5] Initializing AlertHandler (sound={'ENABLED' if enable_sound else 'DISABLED'}, alert_dir='{alert_dir}')")
+    alert_handler = AlertHandler(
+        output_dir=alert_dir,
+        enable_sound=enable_sound,
+        async_sound=True
+    )
 
     # 2. Setup Video / Webcam Source
     is_sequence = sequence_path is not None
@@ -415,10 +463,9 @@ def run_pipeline(
             if yolo_results.keypoints is not None and len(yolo_results.keypoints.data) > 0:
                 all_kps = yolo_results.keypoints.data.cpu().numpy()
                 if yolo_results.boxes is not None and len(yolo_results.boxes) > 0:
-                    boxes = yolo_results.boxes.xyxy.cpu().numpy()
-                    areas = (boxes[:, 2] - boxes[:, 0]) * (boxes[:, 3] - boxes[:, 1])
-                    best_person_idx = int(areas.argmax())
-                    person_confidence = float(yolo_results.boxes.conf[best_person_idx].item())
+                    confs = yolo_results.boxes.conf.cpu().numpy()
+                    best_person_idx = int(confs.argmax())
+                    person_confidence = float(confs[best_person_idx])
                 else:
                     best_person_idx = 0
                     person_confidence = 0.5
@@ -434,7 +481,16 @@ def run_pipeline(
             )
 
             # 5. Extract Features & Predict Probabilities
-            if feature_buffer.is_ready():
+            # A window is valid for AI classification ONLY IF:
+            # 1. The buffer is full (20 frames)
+            # 2. A person is actively detected in the current frame
+            # 3. Missing ratio in buffer <= 0.20 (within trained feature distribution)
+            raw_feat = None
+            if (
+                feature_buffer.is_ready()
+                and person_detected
+                and (feature_buffer.get_missing_ratio() <= 0.20)
+            ):
                 raw_feat = feature_buffer.extract_features()
                 feat_df = pd.DataFrame([raw_feat], columns=FEATURE_COLS)
                 scaled_feat = scaler.transform(feat_df)
@@ -443,32 +499,66 @@ def run_pipeline(
                 p_fall = float(probs[1])
                 p_lie = float(probs[2])
             else:
-                # Buffer warming up (< 20 frames)
-                p_norm = 1.0
+                # When no person is detected or buffer has > 20% missing frames:
+                # Do NOT pass out-of-distribution empty keypoints to the classifier.
+                p_norm = 1.0 if not person_detected else 0.8
                 p_fall = 0.0
                 p_lie = 0.0
 
-            # 6. Update FallStateMachine
+            # 6. Step 5.3: Motion-Based Fall Event Analysis
+            if raw_feat is not None:
+                motion_evidence = motion_detector.analyze_feature_vector(
+                    features=raw_feat,
+                    timestamp=active_timestamp,
+                    person_detected=person_detected,
+                    p_lying=p_lie
+                )
+            else:
+                motion_evidence = motion_detector.update(
+                    timestamp=active_timestamp,
+                    torso_angle=0.0,
+                    downward_velocity=0.0,
+                    delta_hip_y=0.0,
+                    delta_torso_angle=0.0,
+                    person_detected=person_detected,
+                    p_lying=p_lie
+                )
+
+            # 7. Update FallStateMachine with ML probabilities and motion evidence
             fsm_out = fsm.update(
                 timestamp=active_timestamp,
                 p_normal=p_norm,
                 p_falling=p_fall,
                 p_lying=p_lie,
-                person_detected=person_detected
+                person_detected=person_detected,
+                motion_evidence=motion_evidence
             )
 
-            # 7. Check & Log Events
+            # 8. Render Preview Base Frame
+            display_frame = yolo_results.plot() if person_detected else frame.copy()
+
+            # 9. Check & Log Events
             if fsm_out.event == "ALERT_TRIGGERED":
                 alert_events_logged += 1
+                alert_res = alert_handler.trigger_alert(
+                    frame=display_frame,
+                    timestamp=active_timestamp
+                )
                 print(f"\n>>> [ALERT_TRIGGERED] at t={active_timestamp:.2f}s (Frame #{frame_idx})!")
                 print(f"    State transitioned to: {fsm_out.state.value}")
                 print(f"    Ground Duration: {fsm_out.elapsed_ground_time:.2f}s | Probabilities: N={p_norm:.2f}, F={p_fall:.2f}, L={p_lie:.2f}")
-                print("    (Note: Real audio alarm and snapshot capture deferred to Step 5.2)\n")
+                if alert_res.get("snapshot_saved"):
+                    print(f"    [SNAPSHOT] Saved to: {alert_res['snapshot_path']}")
+                if alert_res.get("sound_played"):
+                    print(f"    [AUDIO] Fall alert sound dispatched.")
+                print()
+            elif fsm_out.event in ("RECOVERED", "POST_FALL_RESET", "SUSPECT_CLEARED", "SUSPECT_TIMEOUT"):
+                print(f"[EVENT] {fsm_out.event} at t={active_timestamp:.2f}s (State: {fsm_out.state.value})")
+                alert_handler.reset()
             elif fsm_out.event:
                 print(f"[EVENT] {fsm_out.event} at t={active_timestamp:.2f}s (State: {fsm_out.state.value})")
 
-            # 8. Render Preview & HUD
-            display_frame = yolo_results.plot() if person_detected else frame.copy()
+            # 10. Render HUD Overlay with Motion Indicators
             draw_hud(
                 frame=display_frame,
                 state=fsm_out.state,
@@ -478,7 +568,9 @@ def run_pipeline(
                 person_detected=person_detected,
                 elapsed_ground=fsm_out.elapsed_ground_time,
                 confirm_limit=fsm_config.ground_confirm_time,
-                fps=fps_live
+                fps=fps_live,
+                alert_active=alert_handler.is_alert_active,
+                motion_evidence=motion_evidence
             )
 
             if not headless:
@@ -489,8 +581,10 @@ def run_pipeline(
                     print("[INFO] User pressed 'q'. Exiting...")
                     break
                 elif key == ord('r'):
-                    print("[INFO] User pressed 'r'. Resetting State Machine.")
+                    print("[INFO] User pressed 'r'. Resetting State Machine, MotionDetector, & AlertHandler.")
                     fsm.reset()
+                    motion_detector.reset()
+                    alert_handler.reset()
 
         print(f"\nExecution finished. Processed {frame_idx} frames. Total ALERT events: {alert_events_logged}.")
         return True, "Pipeline executed successfully."
@@ -511,6 +605,11 @@ def main():
     parser.add_argument("--max-frames", type=int, default=None, help="Stop after processing max frames")
     parser.add_argument("--conf", type=float, default=0.25, help="YOLO person confidence threshold (default: 0.25)")
     parser.add_argument("--hold-last-frame", type=float, default=0.0, help="Hold last frame for N seconds in sequence simulation mode")
+    parser.add_argument("--no-sound", action="store_true", help="Disable alert beep sound")
+    parser.add_argument("--alert-dir", type=str, default="output/alerts", help="Directory to save snapshot images on alert (default: output/alerts)")
+    parser.add_argument("--min-downward-velocity", type=float, default=2.0, help="Min peak downward velocity (scale units/s) for fall motion (default: 2.0)")
+    parser.add_argument("--ground-confirm-time", type=float, default=2.5, help="Seconds on ground to confirm fall alert (default: 2.5)")
+    parser.add_argument("--no-motion-validation", action="store_true", help="Disable Step 5.3 motion-based validation and use ML-only fallback")
 
     args = parser.parse_args()
 
@@ -521,7 +620,12 @@ def main():
         headless=args.headless,
         max_frames=args.max_frames,
         yolo_conf=args.conf,
-        hold_last_seconds=args.hold_last_frame
+        hold_last_seconds=args.hold_last_frame,
+        enable_sound=not args.no_sound,
+        alert_dir=args.alert_dir,
+        enable_motion_validation=not args.no_motion_validation,
+        min_downward_velocity=args.min_downward_velocity,
+        ground_confirm_time=args.ground_confirm_time
     )
 
     if not success:

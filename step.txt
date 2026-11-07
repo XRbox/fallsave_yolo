@@ -1,0 +1,72 @@
+  ──────
+  ## 1. Data Preparation (การเตรียมข้อมูล)
+  เราทำตั้งแต่การตรวจสอบความสะอาดของข้อมูลดิบ จนถึงการสร้างฟีเจอร์ทางชีวกลศาสตร์ (Biomechanical Features):
+  1. Leak-Free Sequence Splitting (การแบ่งชุดข้อมูลแบบป้องกันข้อมูลรั่วไหล):
+      • แบ่งชุดข้อมูลระดับ Sequence (วิดีโอ) แทนที่จะสุ่มระดับเฟรม เพื่อป้องกันปัญหา Data Leakage จากเฟรมติดกันที่มีลักษณะท่าทางคล้ายกัน
+      • แบ่งเป็น Train / Validation / Test ชัดเจน โดยในขั้นตอนทดสอบจริงได้นำไปประเมินกับชุดวิดีโอภายนอก (VideoDataset 2,014 คลิป)
+  2. Confidence Masking & Outlier Removal:
+      • คัดกรอง Keypoints ที่ YOLO มีค่า Confidence ต่ำกว่าเกณฑ์ (< 0.20) โดยมาร์กเป็น NaN เพื่อไม่ให้พิกัดที่เพี้ยนมาหลอกโมเดล
+  3. Micro-gap Interpolation (การเติมช่องว่างคีย์พอยต์):
+      • ใช้ Linear Interpolation ซ่อมแซมช่วงที่คีย์พอยต์กระพริบหายไปไม่เกิน 3 เฟรม ช่วยลด Noise ขณะกล้องจับภาพ
+  4. Scale-Invariant Normalization (การปรับสเกลตามสรีระ):
+      • ปรับขนาดพิกัดด้วย Torso Length (ระยะห่างเฉลี่ยระหว่างไหล่และสะโพก) ทำให้ค่าความเร็วและมุมเอียงไม่ขึ้นอยู่กับว่าผู้ใช้ยืนใกล้หรือไกลจากกล้อง
+  5. Feature Scaling:
+      • ใช้ StandardScaler ปรับสเกลให้อยู่ในรูป Mean=0, Std=1 โดย Fit เฉพาะบนชุด Train เพื่อป้องกัน Data Snooping
+  ──────
+  ## 2. Data Pipeline (ท่อประมวลผลข้อมูลแบบ Real-Time)
+
+  เราออกแบบ Data Pipeline ทำงานต่อเนื่องเฟรมต่อเฟรม (End-to-End Pipeline) ดังนี้:
+    🎥 Video / Webcam Frame
+             │
+             ▼
+    [1] Pose Extraction (YOLO11n-Pose) ──> สกัด 17 Keypoints (x, y, confidence)
+             │
+             ▼
+    [2] Sliding Window Buffer (20 Frames) ──> หน้าต่างเวลาขนาด 20 เฟรม (~0.67s ที่ 30 FPS)
+             │
+             ▼
+    [3] Biomechanical Feature Pipeline ──> คำนวณฟีเจอร์การเคลื่อนไหว 17 ตัวแปร
+             │
+             ▼
+    [4] Normalization (StandardScaler) ──> แปลงฟีเจอร์ด้วย Scaler ที่ผ่านการเทรน
+             │
+             ▼
+    [5] ML Inference (Logistic Regression) ──> ทำนายความน่าจะเป็น P(Normal), P(Falling), P(Lying)
+             │
+             ▼
+    [6] Temporal State Machine (4 States) ──> ควบคุมตรรกะเวลาและการแจ้งเตือนฉุกเฉิน
+
+  ### 17 Biomechanical Features ที่สกัดได้จาก Sliding Window:
+  • มุมลำตัว (Torso Angle): ค่าเฉลี่ย, ค่าสูงสุด, ค่าต่ำสุด, ผลต่าง (Δ), และค่าเบี่ยงเบนมาตรฐาน (Std)
+  • ความเร็วและการเคลื่อนที่ในแนวดิ่ง (Vertical Velocity): ความเร็วสูงสุดขณะทิ้งดิ่ง (V_{y,max}), ความเร็วเฉลี่ย, ระดับการเปลี่ยนตำแหน่งของสะโพก
+  (Δy), และระดับสะโพกสูงสุด
+  • ความเร็วเชิงมุม (Angular Velocity): ความเร็วในการหมุนลำตัวเฉลี่ยและสูงสุด
+  • สัดส่วนร่างกาย (Body Aspect Ratio & Spans): อัตราส่วนความกว้างต่อความสูงของกล่องร่างกาย (Aspect Ratio) และระยะยืดลำตัว
+  • ความสมบูรณ์ของข้อมูล: อัตราส่วนเฟรมที่ตรวจไม่พบคีย์พอยต์ (Missing Ratio) และค่าเฉลี่ย Confidence
+  ──────
+  ## 3. Models and Algorithms ที่ใช้งาน
+  เราใช้สถาปัตยกรรมแบบ Hybrid Architecture (Vision AI + Machine Learning + Rule-Based State Machine):
+
+  ### 1. Vision AI Model
+
+  • YOLO11n-Pose (Ultralytics Pretrained):
+      • หน้าที่: ทำหน้าที่เป็น Human Pose Estimation ตรวจจับ 17 ตำแหน่งข้อต่อโครงกระดูกของมนุษย์แบบ Real-Time บน CPU/GPU ได้อย่างรวดเร็ว
+
+
+  ### 2. Machine Learning Classifier
+
+  • Balanced Logistic Regression (โมเดลหลักในระบบจริง):
+      • ใช้จำแนก 3 คลาส: Normal, Falling, Lying
+      • ใช้พารามิเตอร์ class_weight='balanced' เพื่อแก้ปัญหา Class Imbalance (เนื่องจากเหตุการณ์ล้มมีสัดส่วนน้อยมากเมื่อเทียบกับท่ายืน/เดินปกติ)
+      • ส่งค่าผลลัพธ์ออกมาเป็น Softmax Probabilities เพื่อนำไปป้อนให้ State Machine
+  • (โมเดลที่ใช้เปรียบเทียบในขั้นตอนทดลอง): Random Forest (Balanced) และ Dummy Baseline Classifier
+
+  ### 3. Temporal Decision Algorithm
+
+  • 4-State Finite State Machine (FSM):
+      1. NORMAL: สภาวะปกติ
+      2. FALLING_SUSPECTED: เมื่อ P_{falling} ≥ 0.45 (เริ่มนับเวลาเฝ้าระวัง หากลุกขึ้นเร็วจะรีเซ็ตกลับปกติ)
+      3. GROUND_CHECK: เมื่อ P_{lying} ≥ 0.35 หรือตรวจไม่พบคีย์พอยต์บนพื้นหลังจากล้ม (จับเวลานอนนิ่ง ≥ 2.0 วินาที)
+      4. FALL_CONFIRMED: ยืนยันการหกล้มจริง → บันทึกภาพ Snapshot และส่งเสียงเตือนไซเรนฉุกเฉิน
+  • Quick Recovery & Anti-False Alarm Logic:
+      • หากผู้ใช้เพียงแค่สะดุด หรือก้มเก็บของ แล้วลุกขึ้นยืนเองได้ภายใน 1 วินาที ระบบจะยกเลิกการเตือนทันที เพื่อลด False Alarm
